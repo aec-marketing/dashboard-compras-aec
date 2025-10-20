@@ -1,66 +1,106 @@
-import { useEffect, useState } from 'react';
-import { onAuthStateChanged, User } from 'firebase/auth';
-import { auth } from './services/firebase';
+// src/App.tsx
+import React, { useState, useEffect } from 'react';
+import { useAuth } from './hooks/useAuth';
+import { getUserDepartmentFromFirestore } from './services/userService';
 import Login from './components/Auth/Login';
+import DashboardCompras from './components/Dashboard/DashboardCompras';
+import DashboardEngenharia from './components/Dashboard/DashboardEngenharia';
+import AdminPanel from './components/Admin/AdminPanel';
+import type { Department } from './utils/permissions';
+import './index.css';
 
 function App() {
-  const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+  const { user, loading } = useAuth();
+  const [userDepartment, setUserDepartment] = useState<Department | 'ADM' | null>(null);
+  const [loadingDepartment, setLoadingDepartment] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-      setLoading(false);
-    });
+    const fetchUserDepartment = async () => {
+      if (!user?.email) return;
 
-    return () => unsubscribe();
-  }, []);
+      try {
+        setLoadingDepartment(true);
+        const department = await getUserDepartmentFromFirestore(user.email);
+        
+        if (!department) {
+          setError('Usuário não autorizado. Contacte o administrador.');
+        } else {
+          setUserDepartment(department);
+          setError(null);
+        }
+      } catch (err) {
+        setError('Erro ao carregar permissões do usuário.');
+        console.error(err);
+      } finally {
+        setLoadingDepartment(false);
+      }
+    };
+
+    fetchUserDepartment();
+  }, [user]);
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-100">
+      <div className="flex items-center justify-center min-h-screen bg-gray-100">
         <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
           <p className="mt-4 text-gray-600">Carregando...</p>
         </div>
       </div>
     );
   }
 
-  return (
-    <div>
-      {!user ? (
-        <Login />
-      ) : (
-        <div className="min-h-screen bg-gray-100 p-8">
-          <div className="max-w-4xl mx-auto bg-white rounded-lg shadow p-8">
-            <h1 className="text-4xl font-bold text-gray-800 mb-4">
-              Bem-vindo! 🎉
-            </h1>
-            <p className="text-gray-600 text-lg mb-4">
-              Você está logado como: <strong>{user.email}</strong>
-            </p>
-            <button
-              onClick={() => auth.signOut()}
-              className="bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-lg transition"
-            >
-              Sair
-            </button>
+  // Se NÃO tem usuário, mostra Login (ANTES de verificar departamento)
+  if (!user) {
+    return <Login />;
+  }
 
-            <div className="mt-8 p-6 bg-green-50 border border-green-200 rounded-lg">
-              <h2 className="text-xl font-bold text-green-800 mb-4">
-                ✅ Tudo Funcionando!
-              </h2>
-              <ul className="text-green-700 space-y-2">
-                <li>✓ Firebase Authentication: OK</li>
-                <li>✓ Google Sheets API: Pronto</li>
-                <li>✓ Tailwind CSS: Ativo</li>
-                <li>✓ Variáveis de Ambiente: Carregadas</li>
-              </ul>
-            </div>
-          </div>
+  // Só DEPOIS que tem usuário, carrega o departamento
+  if (loadingDepartment) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-gray-100">
+        <div className="text-center">
+          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+          <p className="mt-4 text-gray-600">Carregando permissões...</p>
         </div>
-      )}
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-red-50">
+        <div className="bg-white rounded-lg shadow-lg p-8 max-w-md text-center">
+          <h1 className="text-2xl font-bold text-red-600 mb-4">Acesso Negado</h1>
+          <p className="text-gray-700 mb-6">{error}</p>
+          <p className="text-sm text-gray-500">Email: {user.email}</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Renderiza o dashboard correto baseado no departamento
+  if (userDepartment === 'ADM') {
+    return <AdminPanel />;
+  }
+
+  if (userDepartment === 'COMPRAS') {
+    return <DashboardCompras department={userDepartment} />;
+  }
+
+  if (userDepartment === 'ENGENHARIA') {
+    return <DashboardEngenharia department={userDepartment} />;
+  }
+
+  // Se chegou aqui, departamento não foi reconhecido
+  return (
+    <div className="flex items-center justify-center min-h-screen bg-red-50">
+      <div className="bg-white rounded-lg shadow-lg p-8 max-w-md text-center">
+        <h1 className="text-2xl font-bold text-red-600 mb-4">Erro</h1>
+        <p className="text-gray-700 mb-6">Departamento não reconhecido: {userDepartment}</p>
+        <p className="text-sm text-gray-500">Email: {user.email}</p>
+      </div>
     </div>
   );
 }
