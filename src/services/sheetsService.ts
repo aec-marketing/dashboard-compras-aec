@@ -177,7 +177,7 @@ async function getAccessToken(): Promise<string> {
 async function updateSheetValue(range: string, values: string[][]): Promise<void> {
   try {
     const url = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${range}?valueInputOption=USER_ENTERED`;
-    
+
     const response = await fetch(url, {
       method: 'PUT',
       headers: {
@@ -200,11 +200,53 @@ async function updateSheetValue(range: string, values: string[][]): Promise<void
   }
 }
 
+async function insertRowAt(rowIndex: number): Promise<void> {
+  try {
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}:batchUpdate`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${await getAccessToken()}`
+      },
+      body: JSON.stringify({
+        requests: [
+          {
+            insertDimension: {
+              range: {
+                sheetId: 0, // ID da aba "COMPRAS" (geralmente 0 para a primeira aba)
+                dimension: 'ROWS',
+                startIndex: rowIndex - 1, // API usa índice baseado em 0
+                endIndex: rowIndex // Inserir 1 linha
+              },
+              inheritFromBefore: false
+            }
+          }
+        ]
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      console.error('Erro ao inserir linha:', errorData);
+      throw new Error(`Erro ao inserir linha. Status: ${response.status}`);
+    }
+
+    console.log(`Linha ${rowIndex} inserida com sucesso`);
+  } catch (error) {
+    console.error('Erro ao inserir linha:', error);
+    throw error;
+  }
+}
+
 export async function addNewRequest(automacaoData: Partial<RequestRow>): Promise<RequestRow> {
   try {
-    const rows = await fetchSheetData('COMPRAS!A3:A');
-    const nextRow = rows.length + 3;
+    // Primeiro, inserir uma nova linha vazia na posição 3 (logo após o cabeçalho)
+    // Isso empurra todos os dados existentes para baixo
+    await insertRowAt(3);
 
+    // Agora preencher a linha 3 recém-criada com os dados
     const newRowData = [
       '',
       '',
@@ -225,11 +267,13 @@ export async function addNewRequest(automacaoData: Partial<RequestRow>): Promise
       automacaoData.observacao || ''
     ];
 
-    const range = `COMPRAS!A${nextRow}:Q${nextRow}`;
+    const range = 'COMPRAS!A3:Q3';
     await updateSheetValue(range, [newRowData]);
 
+    console.log('Nova solicitação adicionada na linha 3');
+
     return {
-      rowIndex: nextRow,
+      rowIndex: 3,
       dataCompras: '',
       statusCompras: '',
       ordemCompra: '',
