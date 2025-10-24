@@ -3,7 +3,8 @@
     "allow": [
       "Bash(npx tsc --noEmit)",
       "Bash(npm run build)",
-      "Bash(npx tsc src/services/sheetsService.ts --noEmit --skipLibCheck)"
+      "Bash(npx tsc src/services/sheetsService.ts --noEmit --skipLibCheck)",
+      "Bash(npx tsc:*)"
     ],
     "deny": [],
     "ask": []

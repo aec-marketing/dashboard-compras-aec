@@ -1,7 +1,14 @@
-// src/components/Dashboard/DashboardEngenharia.tsx
+// src/components/Dashboard/DashboardEngenharia.tsx - ATUALIZADO
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../hooks/useAuth';
-import { fetchSolicitations, updateAutomacaoField, addNewRequest } from '../../services/sheetsService';
+import { 
+  fetchSolicitations, 
+  updateAutomacaoField, 
+  addNewRequest,
+  addBatchRequest,
+  isBatch 
+} from '../../services/sheetsService';
+import { FormularioLote } from './FormularioLote';
 
 interface RequestRow {
   rowIndex: number;
@@ -22,6 +29,10 @@ interface RequestRow {
   orcamentoLink: string;
   solicitante: string;
   observacao: string;
+  statusItemIndividual: string;
+  vistoCompras: string;
+  ultimaModificacao: string;
+  itemRemovido: string;
 }
 
 const STATUS_AUTOMACAO_OPTIONS = [
@@ -56,8 +67,7 @@ const getStatusComprasColor = (status: string): string => {
 
 const calculateUrgency = (dataAutomacao: string, dataNecessidade: string): { days: number; label: string; color: string } => {
   if (!dataAutomacao || !dataNecessidade) return { days: 999, label: 'Sem prazo', color: 'text-gray-400' };
-  
-  const solicitacao = new Date(dataAutomacao.split('/').reverse().join('-'));
+
   const necessidade = new Date(dataNecessidade.split('/').reverse().join('-'));
   const hoje = new Date();
   
@@ -82,18 +92,21 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const [editingCell, setEditingCell] = useState<{ rowIndex: number; field: string } | null>(null);
   const [tempValue, setTempValue] = useState('');
-  const [showForm, setShowForm] = useState(false);
+  const [showFormType, setShowFormType] = useState<'none' | 'item' | 'lote'>('none');
   
   // Filtros
   const [filterStatus, setFilterStatus] = useState<string>('TODOS');
   const [searchText, setSearchText] = useState('');
+  const [expandedBatches, setExpandedBatches] = useState<Set<string>>(new Set());
 
   const loadData = async () => {
     try {
       setLoading(true);
       setError(null);
       const data = await fetchSolicitations();
-      setRequests(data);
+      // Filtrar apenas itens ativos
+      const activeRequests = data.filter(req => req.itemRemovido !== 'REMOVIDO');
+      setRequests(activeRequests);
       setLastUpdate(new Date());
     } catch (err) {
       setError('Erro ao carregar solicitações. Tente novamente.');
@@ -109,16 +122,33 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
     return () => clearInterval(interval);
   }, []);
 
-  const handleStatusUpdate = async (rowIndex: number, newStatus: string) => {
+  const handleStatusUpdate = async (rowIndex: number, reqMat: string, isLote: boolean, newStatus: string) => {
     try {
-      await updateAutomacaoField(rowIndex, 'E', newStatus);
-      setRequests(prev =>
-        prev.map(req =>
-          req.rowIndex === rowIndex
-            ? { ...req, statusAutomacao: newStatus }
-            : req
-        )
-      );
+      if (isLote) {
+        // Atualizar todos os itens do lote
+        const batchItems = requests.filter(r => r.reqMat === reqMat);
+        for (const item of batchItems) {
+          await updateAutomacaoField(item.rowIndex, 'E', newStatus);
+        }
+        // Atualizar estado local
+        setRequests(prev =>
+          prev.map(req =>
+            req.reqMat === reqMat
+              ? { ...req, statusAutomacao: newStatus }
+              : req
+          )
+        );
+      } else {
+        // Atualizar apenas o item individual
+        await updateAutomacaoField(rowIndex, 'E', newStatus);
+        setRequests(prev =>
+          prev.map(req =>
+            req.rowIndex === rowIndex
+              ? { ...req, statusAutomacao: newStatus }
+              : req
+          )
+        );
+      }
       setEditingCell(null);
     } catch (err) {
       setError('Erro ao atualizar status.');
@@ -126,18 +156,17 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
     }
   };
 
-  const handleNewRequest = async (e: React.FormEvent<HTMLFormElement>) => {
+  const handleNewItemRequest = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
     
     try {
       setLoading(true);
       
-      // Converter data para formato BR se necessário
       const dataNecessidade = formData.get('dataNecessidade') as string;
       const dataNecessidadeBR = dataNecessidade ? new Date(dataNecessidade).toLocaleDateString('pt-BR') : '';
       
-      const newReq = await addNewRequest({
+      await addNewRequest({
         statusAutomacao: (formData.get('statusAutomacao') as string) || 'COMPRAR NORMAL',
         reqMat: (formData.get('reqMat') as string) || '',
         dataAutomacao: new Date().toLocaleDateString('pt-BR'),
@@ -152,8 +181,8 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
         observacao: (formData.get('observacao') as string) || ''
       });
 
-      await loadData(); // Recarregar para pegar o novo item
-      setShowForm(false);
+      await loadData();
+      setShowFormType('none');
       setError(null);
     } catch (err) {
       setError('Erro ao criar solicitação.');
@@ -163,32 +192,78 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
     }
   };
 
+  const handleNewBatchRequest = async (sharedData: any, products: any[]) => {
+    try {
+      setLoading(true);
+      await addBatchRequest(sharedData, products);
+      await loadData();
+      setShowFormType('none');
+      setError(null);
+    } catch (err) {
+      setError('Erro ao criar lote.');
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const toggleBatchExpansion = (reqMat: string) => {
+    setExpandedBatches(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(reqMat)) {
+        newSet.delete(reqMat);
+      } else {
+        newSet.add(reqMat);
+      }
+      return newSet;
+    });
+  };
+
+  // Agrupar solicitações (lotes + itens individuais)
+  const groupedRequests = requests.reduce((acc, req) => {
+    if (req.reqMat && isBatch(req.reqMat, requests)) {
+      // É um lote
+      if (!acc[req.reqMat]) {
+        acc[req.reqMat] = [];
+      }
+      acc[req.reqMat].push(req);
+    } else {
+      // Item individual
+      acc[`single-${req.rowIndex}`] = [req];
+    }
+    return acc;
+  }, {} as Record<string, RequestRow[]>);
+
   // Aplicar filtros
-  const filteredRequests = requests.filter(req => {
+  const filteredGroups = Object.entries(groupedRequests).filter(([key, items]) => {
+    const firstItem = items[0];
+    
     // Filtro de status
-    if (filterStatus !== 'TODOS' && req.statusCompras !== filterStatus) return false;
+    if (filterStatus !== 'TODOS' && firstItem.statusCompras !== filterStatus) return false;
     
     // Busca por texto
     if (searchText) {
       const search = searchText.toLowerCase();
-      return (
-        req.descricaoProduto?.toLowerCase().includes(search) ||
-        req.codRef?.toLowerCase().includes(search) ||
-        req.projeto?.toLowerCase().includes(search) ||
-        req.solicitante?.toLowerCase().includes(search)
+      return items.some(item =>
+        item.descricaoProduto?.toLowerCase().includes(search) ||
+        item.codRef?.toLowerCase().includes(search) ||
+        item.projeto?.toLowerCase().includes(search) ||
+        item.solicitante?.toLowerCase().includes(search) ||
+        item.reqMat?.toLowerCase().includes(search)
       );
     }
     
     return true;
-  }).sort((a, b) => {
-    // Ordenar por data de necessidade (mais urgente primeiro)
-    const urgA = calculateUrgency(a.dataAutomacao, a.dataNecessidade).days;
-    const urgB = calculateUrgency(b.dataAutomacao, b.dataNecessidade).days;
+  }).sort(([, itemsA], [, itemsB]) => {
+    // Ordenar por urgência
+    const urgA = calculateUrgency(itemsA[0].dataAutomacao, itemsA[0].dataNecessidade).days;
+    const urgB = calculateUrgency(itemsB[0].dataAutomacao, itemsB[0].dataNecessidade).days;
     return urgA - urgB;
   });
 
   const stats = {
     total: requests.length,
+    lotes: Object.keys(groupedRequests).filter(key => !key.startsWith('single-')).length,
     comprar: requests.filter(r => r.statusCompras === 'COMPRAR').length,
     orcamento: requests.filter(r => r.statusCompras === 'ORÇAMENTO').length,
     comprado: requests.filter(r => r.statusCompras === 'COMPRADO').length,
@@ -219,10 +294,14 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
 
       <main className="max-w-7xl mx-auto px-4 py-6">
         {/* Stats Cards */}
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
+        <div className="grid grid-cols-2 md:grid-cols-6 gap-4 mb-6">
           <div className="bg-white rounded-lg shadow p-4">
-            <p className="text-gray-600 text-sm">Total</p>
+            <p className="text-gray-600 text-sm">Total Itens</p>
             <p className="text-2xl font-bold text-gray-800">{stats.total}</p>
+          </div>
+          <div className="bg-purple-50 rounded-lg shadow p-4 border border-purple-200">
+            <p className="text-purple-600 text-sm font-medium">Lotes</p>
+            <p className="text-2xl font-bold text-purple-700">{stats.lotes}</p>
           </div>
           <div className="bg-blue-50 rounded-lg shadow p-4 border border-blue-200">
             <p className="text-blue-600 text-sm font-medium">Comprar</p>
@@ -236,26 +315,42 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
             <p className="text-green-600 text-sm font-medium">Comprado</p>
             <p className="text-2xl font-bold text-green-700">{stats.comprado}</p>
           </div>
-          <div className="bg-purple-50 rounded-lg shadow p-4 border border-purple-200">
-            <p className="text-purple-600 text-sm font-medium">Minhas Solicitações</p>
-            <p className="text-2xl font-bold text-purple-700">{stats.minhasSolicitacoes}</p>
+          <div className="bg-indigo-50 rounded-lg shadow p-4 border border-indigo-200">
+            <p className="text-indigo-600 text-sm font-medium">Minhas</p>
+            <p className="text-2xl font-bold text-indigo-700">{stats.minhasSolicitacoes}</p>
           </div>
         </div>
 
-        {/* Botão Nova Solicitação + Filtros */}
+        {/* Botões de Nova Solicitação */}
         <div className="bg-white rounded-lg shadow p-4 mb-6">
           <div className="flex flex-wrap gap-4 items-center">
-            <button
-              onClick={() => setShowForm(!showForm)}
-              className="px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 transition font-semibold text-lg shadow-md"
-            >
-              {showForm ? '✕ Cancelar' : '+ Nova Solicitação'}
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowFormType(showFormType === 'item' ? 'none' : 'item')}
+                className={`px-6 py-3 rounded-lg transition font-semibold text-lg shadow-md ${
+                  showFormType === 'item'
+                    ? 'bg-gray-400 text-white'
+                    : 'bg-green-600 text-white hover:bg-green-700'
+                }`}
+              >
+                {showFormType === 'item' ? '✕ Cancelar' : '📦 Solicitar Item'}
+              </button>
+              <button
+                onClick={() => setShowFormType(showFormType === 'lote' ? 'none' : 'lote')}
+                className={`px-6 py-3 rounded-lg transition font-semibold text-lg shadow-md ${
+                  showFormType === 'lote'
+                    ? 'bg-gray-400 text-white'
+                    : 'bg-purple-600 text-white hover:bg-purple-700'
+                }`}
+              >
+                {showFormType === 'lote' ? '✕ Cancelar' : '📦 Solicitar Lote'}
+              </button>
+            </div>
             
             <div className="flex-1 min-w-[200px]">
               <input
                 type="text"
-                placeholder="🔍 Buscar por item, código, projeto..."
+                placeholder="🔍 Buscar por item, código, REQ MAT, projeto..."
                 value={searchText}
                 onChange={(e) => setSearchText(e.target.value)}
                 className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-green-500 outline-none"
@@ -295,13 +390,14 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
           </div>
         )}
 
-        {/* Formulário de Nova Solicitação */}
-        {showForm && (
+        {/* Formulário de Item Individual */}
+        {showFormType === 'item' && (
           <div className="bg-white rounded-lg shadow-lg p-6 mb-6 border-2 border-green-500">
             <h2 className="text-2xl font-bold text-gray-800 mb-4 flex items-center gap-2">
-              📝 Nova Solicitação
+              📝 Solicitar Item Individual
             </h2>
-            <form onSubmit={handleNewRequest} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <form onSubmit={handleNewItemRequest} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Mesmos campos do formulário anterior */}
               <div>
                 <label htmlFor="statusAutomacao" className="block text-sm font-medium mb-1">
                   Prioridade <span className="text-red-600">*</span>
@@ -401,12 +497,13 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
 
               <div>
                 <label htmlFor="reqMat" className="block text-sm font-medium mb-1">
-                  REQ. MAT.
+                  REQ MAT (opcional)
                 </label>
                 <input
                   id="reqMat"
                   type="text"
                   name="reqMat"
+                  placeholder="Deixe vazio para item individual"
                   className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-green-500"
                 />
               </div>
@@ -422,9 +519,6 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
                   placeholder="Cole o link ou escreva 'Orçamento no email', 'Ver pasta X', etc."
                   className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-green-500"
                 />
-                <p className="text-xs text-gray-500 mt-1">
-                  💡 Pode ser um link direto ou uma descrição como "Orçamento no email"
-                </p>
               </div>
 
               <div className="md:col-span-2">
@@ -444,9 +538,6 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
                 <p className="text-sm text-blue-800">
                   <strong>📧 Solicitante:</strong> {user?.email}
                 </p>
-                <p className="text-xs text-blue-600 mt-1">
-                  Seu email será automaticamente registrado na solicitação
-                </p>
               </div>
 
               <div className="md:col-span-2 flex gap-3">
@@ -459,7 +550,7 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
                 </button>
                 <button
                   type="button"
-                  onClick={() => setShowForm(false)}
+                  onClick={() => setShowFormType('none')}
                   className="px-6 py-3 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400 transition font-semibold"
                 >
                   Cancelar
@@ -469,33 +560,46 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
           </div>
         )}
 
+        {/* Formulário de Lote */}
+        {showFormType === 'lote' && (
+          <FormularioLote
+            userEmail={user?.email || ''}
+            onSubmit={handleNewBatchRequest}
+            onCancel={() => setShowFormType('none')}
+            loading={loading}
+          />
+        )}
+
         {/* Cards Grid */}
         {loading && requests.length === 0 ? (
           <div className="text-center py-12">
             <div className="animate-spin text-4xl mb-4">⟳</div>
             <p className="text-gray-600">Carregando solicitações...</p>
           </div>
-        ) : filteredRequests.length === 0 ? (
+        ) : filteredGroups.length === 0 ? (
           <div className="text-center py-12 bg-white rounded-lg shadow">
             <p className="text-gray-600 text-lg">📭 Nenhuma solicitação encontrada</p>
           </div>
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            {filteredRequests.map((req) => {
-              const urgency = calculateUrgency(req.dataAutomacao, req.dataNecessidade);
-              const isMinhaSolicitacao = req.solicitante === user?.email;
+            {filteredGroups.map(([groupKey, items]) => {
+              const isLoteGroup = !groupKey.startsWith('single-');
+              const firstItem = items[0];
+              const urgency = calculateUrgency(firstItem.dataAutomacao, firstItem.dataNecessidade);
+              const isMinhaSolicitacao = firstItem.solicitante === user?.email;
+              const isExpanded = expandedBatches.has(firstItem.reqMat);
               
               return (
                 <div
-                  key={req.rowIndex}
+                  key={groupKey}
                   className={`bg-white rounded-lg shadow-md hover:shadow-xl transition-shadow border-l-4 ${
                     isMinhaSolicitacao ? 'ring-2 ring-purple-300' : ''
                   }`}
                   style={{
                     borderLeftColor:
-                      req.statusCompras === 'COMPRADO' ? '#16a34a' :
-                      req.statusCompras === 'ORÇAMENTO' ? '#eab308' :
-                      req.statusCompras === 'COMPRAR' ? '#3b82f6' :
+                      firstItem.statusCompras === 'COMPRADO' ? '#16a34a' :
+                      firstItem.statusCompras === 'ORÇAMENTO' ? '#eab308' :
+                      firstItem.statusCompras === 'COMPRAR' ? '#3b82f6' :
                       '#6b7280'
                   }}
                 >
@@ -504,13 +608,16 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
                     <div className="flex justify-between items-start mb-4">
                       <div className="flex-1">
                         <div className="flex flex-wrap items-center gap-2 mb-2">
-                          {/* Status de Compras (informado pelo setor de compras) */}
-                          <span className={`px-3 py-1 rounded-full text-xs font-bold ${getStatusComprasColor(req.statusCompras)}`}>
-                            📦 {req.statusCompras || 'PENDENTE'}
+                          {isLoteGroup && (
+                            <span className="px-3 py-1 bg-purple-600 text-white rounded-full text-xs font-bold">
+                              📦 LOTE • {items.length} itens
+                            </span>
+                          )}
+                          <span className={`px-3 py-1 rounded-full text-xs font-bold ${getStatusComprasColor(firstItem.statusCompras)}`}>
+                            📦 {firstItem.statusCompras || 'PENDENTE'}
                           </span>
-                          {/* Status da Engenharia (editável) */}
-                          <span className={`px-3 py-1 rounded-full text-xs font-bold ${getStatusAutomacaoColor(req.statusAutomacao)}`}>
-                            🔧 {req.statusAutomacao || 'SEM STATUS'}
+                          <span className={`px-3 py-1 rounded-full text-xs font-bold ${getStatusAutomacaoColor(firstItem.statusAutomacao)}`}>
+                            🔧 {firstItem.statusAutomacao || 'SEM STATUS'}
                           </span>
                           <span className={`text-sm font-semibold ${urgency.color}`}>
                             ⏱ {urgency.label}
@@ -521,63 +628,143 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
                             </span>
                           )}
                         </div>
-                        <h3 className="text-lg font-bold text-gray-800 line-clamp-2">
-                          {req.descricaoProduto || 'Sem descrição'}
-                        </h3>
+                        
+                        {isLoteGroup ? (
+                          <div>
+                            <h3 className="text-lg font-bold text-gray-800">
+                              REQ MAT: {firstItem.reqMat}
+                            </h3>
+                            <p className="text-sm text-gray-600">{firstItem.projeto || 'Sem projeto'}</p>
+                            <button
+                              onClick={() => toggleBatchExpansion(firstItem.reqMat)}
+                              className="mt-2 text-blue-600 hover:text-blue-800 text-sm font-medium"
+                            >
+                              {isExpanded ? '▼ Ocultar produtos' : '▶ Ver todos os produtos'}
+                            </button>
+                          </div>
+                        ) : (
+                          <h3 className="text-lg font-bold text-gray-800 line-clamp-2">
+                            {firstItem.descricaoProduto || 'Sem descrição'}
+                          </h3>
+                        )}
                       </div>
                     </div>
 
-                    {/* Informações Principais */}
-                    <div className="grid grid-cols-2 gap-3 mb-4 text-sm">
-                      <div>
-                        <p className="text-gray-500 text-xs">Código/Ref</p>
-                        <p className="font-semibold text-gray-800">{req.codRef || '-'}</p>
+                    {/* Informações Principais do Lote ou Item */}
+                    {!isLoteGroup && (
+                      <div className="grid grid-cols-2 gap-3 mb-4 text-sm">
+                        <div>
+                          <p className="text-gray-500 text-xs">Código/Ref</p>
+                          <p className="font-semibold text-gray-800">{firstItem.codRef || '-'}</p>
+                        </div>
+                        <div>
+                          <p className="text-gray-500 text-xs">Quantidade</p>
+                          <p className="font-semibold text-gray-800">{firstItem.qtde || '-'}</p>
+                        </div>
+                        <div>
+                          <p className="text-gray-500 text-xs">Solicitante</p>
+                          <p className="font-semibold text-gray-800 text-xs">{firstItem.solicitante || '-'}</p>
+                        </div>
+                        <div>
+                          <p className="text-gray-500 text-xs">Projeto</p>
+                          <p className="font-semibold text-gray-800">{firstItem.projeto || '-'}</p>
+                        </div>
+                        <div>
+                          <p className="text-gray-500 text-xs">Data Solicitação</p>
+                          <p className="font-semibold text-gray-800">{firstItem.dataAutomacao || '-'}</p>
+                        </div>
+                        <div>
+                          <p className="text-gray-500 text-xs">Data Necessidade</p>
+                          <p className="font-semibold text-red-600">{firstItem.dataNecessidade || '-'}</p>
+                        </div>
                       </div>
-                      <div>
-                        <p className="text-gray-500 text-xs">Quantidade</p>
-                        <p className="font-semibold text-gray-800">{req.qtde || '-'}</p>
-                      </div>
-                      <div>
-                        <p className="text-gray-500 text-xs">Solicitante</p>
-                        <p className="font-semibold text-gray-800 text-xs">{req.solicitante || '-'}</p>
-                      </div>
-                      <div>
-                        <p className="text-gray-500 text-xs">Projeto</p>
-                        <p className="font-semibold text-gray-800">{req.projeto || '-'}</p>
-                      </div>
-                      <div>
-                        <p className="text-gray-500 text-xs">Data Solicitação</p>
-                        <p className="font-semibold text-gray-800">{req.dataAutomacao || '-'}</p>
-                      </div>
-                      <div>
-                        <p className="text-gray-500 text-xs">Data Necessidade</p>
-                        <p className="font-semibold text-red-600">{req.dataNecessidade || '-'}</p>
-                      </div>
-                    </div>
+                    )}
 
-                    {/* Material/Marca */}
-                    {req.materialMarca && (
+                    {/* Lista de Produtos do Lote (quando expandido) */}
+                    {isLoteGroup && isExpanded && (
+                      <div className="mb-4 space-y-3">
+                        {items.map((item, idx) => (
+                          <div key={item.rowIndex} className="p-3 bg-gray-50 rounded-lg border border-gray-200">
+                            <div className="flex justify-between items-start mb-2">
+                              <h4 className="font-bold text-gray-800">#{idx + 1} - {item.descricaoProduto}</h4>
+                              {item.statusItemIndividual && (
+                                <span className="text-xs px-2 py-1 bg-blue-100 text-blue-700 rounded">
+                                  {item.statusItemIndividual}
+                                </span>
+                              )}
+                            </div>
+                            <div className="grid grid-cols-2 gap-2 text-sm">
+                              <div>
+                                <p className="text-gray-500 text-xs">Código</p>
+                                <p className="font-semibold">{item.codRef || '-'}</p>
+                              </div>
+                              <div>
+                                <p className="text-gray-500 text-xs">Quantidade</p>
+                                <p className="font-semibold">{item.qtde || '-'}</p>
+                              </div>
+                              {item.materialMarca && (
+                                <div className="col-span-2">
+                                  <p className="text-gray-500 text-xs">Material/Marca</p>
+                                  <p className="text-sm">{item.materialMarca}</p>
+                                </div>
+                              )}
+                              {item.observacao && (
+                                <div className="col-span-2">
+                                  <p className="text-gray-500 text-xs">Observação</p>
+                                  <p className="text-sm text-gray-700">{item.observacao}</p>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Dados compartilhados do lote */}
+                    {isLoteGroup && (
+                      <div className="grid grid-cols-2 gap-3 mb-4 text-sm bg-purple-50 p-3 rounded border border-purple-200">
+                        <div>
+                          <p className="text-purple-700 text-xs font-medium">Solicitante</p>
+                          <p className="font-semibold text-purple-900 text-xs">{firstItem.solicitante || '-'}</p>
+                        </div>
+                        <div>
+                          <p className="text-purple-700 text-xs font-medium">Projeto</p>
+                          <p className="font-semibold text-purple-900">{firstItem.projeto || '-'}</p>
+                        </div>
+                        <div>
+                          <p className="text-purple-700 text-xs font-medium">Data Solicitação</p>
+                          <p className="font-semibold text-purple-900">{firstItem.dataAutomacao || '-'}</p>
+                        </div>
+                        <div>
+                          <p className="text-purple-700 text-xs font-medium">Data Necessidade</p>
+                          <p className="font-semibold text-red-600">{firstItem.dataNecessidade || '-'}</p>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Material/Marca (apenas para item individual) */}
+                    {!isLoteGroup && firstItem.materialMarca && (
                       <div className="mb-3">
                         <p className="text-gray-500 text-xs">Material/Marca</p>
-                        <p className="text-sm text-gray-700">{req.materialMarca}</p>
+                        <p className="text-sm text-gray-700">{firstItem.materialMarca}</p>
                       </div>
                     )}
 
                     {/* Status de Compras - Informações adicionais */}
-                    {(req.ordemCompra || req.previsaoChegada) && (
+                    {(firstItem.ordemCompra || firstItem.previsaoChegada) && (
                       <div className="mb-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
                         <p className="text-xs text-blue-700 font-semibold mb-2">📋 Informações de Compras:</p>
                         <div className="grid grid-cols-2 gap-2 text-sm">
-                          {req.ordemCompra && (
+                          {firstItem.ordemCompra && (
                             <div>
                               <p className="text-blue-600 text-xs">Ordem de Compra</p>
-                              <p className="font-semibold text-blue-900">{req.ordemCompra}</p>
+                              <p className="font-semibold text-blue-900">{firstItem.ordemCompra}</p>
                             </div>
                           )}
-                          {req.previsaoChegada && (
+                          {firstItem.previsaoChegada && (
                             <div>
                               <p className="text-blue-600 text-xs">Previsão Chegada</p>
-                              <p className="font-semibold text-blue-900">{req.previsaoChegada}</p>
+                              <p className="font-semibold text-blue-900">{firstItem.previsaoChegada}</p>
                             </div>
                           )}
                         </div>
@@ -585,11 +772,11 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
                     )}
 
                     {/* Link/Info Orçamento */}
-                    {req.orcamentoLink && (
+                    {firstItem.orcamentoLink && (
                       <div className="mb-4">
-                        {req.orcamentoLink.startsWith('http') ? (
+                        {firstItem.orcamentoLink.startsWith('http') ? (
                           <a
-                            href={req.orcamentoLink}
+                            href={firstItem.orcamentoLink}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="text-blue-600 hover:text-blue-800 text-sm font-medium inline-flex items-center gap-1"
@@ -599,17 +786,17 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
                         ) : (
                           <div className="p-2 bg-gray-50 border border-gray-200 rounded">
                             <p className="text-xs text-gray-600">Orçamento:</p>
-                            <p className="text-sm text-gray-800 font-medium">{req.orcamentoLink}</p>
+                            <p className="text-sm text-gray-800 font-medium">{firstItem.orcamentoLink}</p>
                           </div>
                         )}
                       </div>
                     )}
 
-                    {/* Observação */}
-                    {req.observacao && (
+                    {/* Observação (apenas para item individual) */}
+                    {!isLoteGroup && firstItem.observacao && (
                       <div className="mb-4 p-2 bg-yellow-50 border border-yellow-200 rounded">
                         <p className="text-xs text-yellow-800 font-medium">💬 Observação:</p>
-                        <p className="text-sm text-yellow-900">{req.observacao}</p>
+                        <p className="text-sm text-yellow-900">{firstItem.observacao}</p>
                       </div>
                     )}
 
@@ -617,13 +804,13 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
                     <div className="border-t pt-4">
                       <div className="bg-green-50 p-3 rounded-lg border border-green-200">
                         <label className="text-xs text-green-700 font-semibold block mb-1">
-                          🔧 Atualizar Status (seu controle)
+                          🔧 Atualizar Status {isLoteGroup ? '(aplica a todo o lote)' : ''}
                         </label>
-                        {editingCell?.rowIndex === req.rowIndex && editingCell?.field === 'E' ? (
+                        {editingCell?.rowIndex === firstItem.rowIndex && editingCell?.field === 'E' ? (
                           <select
                             value={tempValue}
                             onChange={(e) => setTempValue(e.target.value)}
-                            onBlur={() => handleStatusUpdate(req.rowIndex, tempValue)}
+                            onBlur={() => handleStatusUpdate(firstItem.rowIndex, firstItem.reqMat, isLoteGroup, tempValue)}
                             autoFocus
                             className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-green-500 text-sm"
                           >
@@ -634,12 +821,12 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
                         ) : (
                           <button
                             onClick={() => {
-                              setEditingCell({ rowIndex: req.rowIndex, field: 'E' });
-                              setTempValue(req.statusAutomacao);
+                              setEditingCell({ rowIndex: firstItem.rowIndex, field: 'E' });
+                              setTempValue(firstItem.statusAutomacao);
                             }}
                             className="w-full px-3 py-2 border border-green-300 bg-white rounded-lg hover:bg-green-50 text-left text-sm font-medium"
                           >
-                            {req.statusAutomacao || 'Clique para definir'}
+                            {firstItem.statusAutomacao || 'Clique para definir'}
                           </button>
                         )}
                       </div>
