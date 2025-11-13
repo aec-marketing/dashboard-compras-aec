@@ -1,4 +1,5 @@
-// Atualizar interface RequestRow no sheetsService.ts
+// sheetsService.ts
+
 const SHEET_ID = process.env.REACT_APP_SHEET_ID!;
 const API_KEY = process.env.REACT_APP_GOOGLE_API_KEY!;
 
@@ -110,6 +111,10 @@ async function getAccessToken(): Promise<string> {
   }
 }
 
+/**
+ * Funçao original que faz uma única escrita (PUT).
+ * Mantida para uso em atualizações de item único que não fazem loop.
+ */
 async function updateSheetValue(range: string, values: string[][]): Promise<void> {
   try {
     const url = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${range}?valueInputOption=USER_ENTERED`;
@@ -132,6 +137,42 @@ async function updateSheetValue(range: string, values: string[][]): Promise<void
     }
   } catch (error) {
     console.error('Erro ao atualizar:', error);
+    throw error;
+  }
+}
+
+/**
+ * **NOVA FUNÇÃO**
+ * Realiza múltiplas atualizações de células/intervalos em uma única requisição (BATCH).
+ * Isso resolve o erro 429 "Too Many Requests" em loops.
+ */
+export async function batchUpdateSheetValues(updates: { range: string; values: string[][] }[]): Promise<void> {
+  if (updates.length === 0) return;
+
+  try {
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchUpdate`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${await getAccessToken()}`
+      },
+      body: JSON.stringify({
+        valueInputOption: 'USER_ENTERED',
+        data: updates
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      console.error('Erro da API no Batch Update:', errorData);
+      throw new Error(`Erro ao atualizar lote de células. Status: ${response.status}`);
+    }
+
+    console.log(`✅ ${updates.length} operações de escrita consolidadas em 1 requisição.`);
+  } catch (error) {
+    console.error('Erro ao realizar Batch Update:', error);
     throw error;
   }
 }
@@ -309,6 +350,7 @@ export async function updateBatchItem(
 
 /**
  * Marca item como removido (soft delete)
+ * Nota: Esta função ainda usa updateSheetValue, mas deve ser evitada em loops (como updateCompleteBatch)
  */
 export async function markItemAsRemoved(
   rowIndex: number,
@@ -334,6 +376,7 @@ export async function markItemAsRemoved(
 
 /**
  * Marca lote como visto pelo setor de compras
+ * REFATORADA: Usa Batch Update (batchUpdateSheetValues) para consolidar N chamadas em 1.
  */
 export async function markBatchAsSeen(
   reqMat: string,
@@ -345,14 +388,18 @@ export async function markBatchAsSeen(
     
     // Encontrar todos os itens do lote
     const batchItems = allRequests.filter(req => req.reqMat === reqMat);
+    const updates: { range: string; values: string[][] }[] = [];
 
-    // Marcar cada item como visto (coluna S)
+    // Acumular a marcação de visto para cada item (coluna S)
     for (const item of batchItems) {
       const vistoRange = `COMPRAS!S${item.rowIndex}`;
-      await updateSheetValue(vistoRange, [[`${timestamp}|${userEmail}`]]);
+      updates.push({ range: vistoRange, values: [[`${timestamp}|${userEmail}`]] });
     }
 
-    console.log(`✅ Lote ${reqMat} marcado como visto por ${userEmail}`);
+    // Executar todas as atualizações em uma única chamada de API
+    await batchUpdateSheetValues(updates);
+
+    console.log(`✅ Lote ${reqMat} marcado como visto por ${userEmail} (Batch).`);
   } catch (error) {
     console.error('Erro ao marcar lote como visto:', error);
     throw error;
@@ -575,6 +622,9 @@ export async function updateRequestFields(
       observacao: 'Q'
     };
 
+    // **OPORTUNIDADE DE MELHORIA**: Você poderia refatorar isso para usar o batchUpdateSheetValues
+    // se esta função for chamada frequentemente com muitos campos.
+    
     // Atualizar cada campo individualmente
     for (const [field, value] of Object.entries(updates)) {
       const column = fieldToColumn[field];
@@ -604,6 +654,7 @@ export function isRequestOwner(request: RequestRow, userEmail: string): boolean 
 
 /**
  * Atualiza dados compartilhados de um lote (afeta todos os itens)
+ * REFATORADA: Usa Batch Update (batchUpdateSheetValues) para consolidar chamadas.
  */
 export async function updateBatchSharedData(
   reqMat: string,
@@ -628,22 +679,27 @@ export async function updateBatchSharedData(
       orcamentoLink: 'O'
     };
 
-    // Atualizar cada campo em todos os itens do lote
+    const updates: { range: string; values: string[][] }[] = [];
+
+    // 1. Acumular atualizações de dados compartilhados
     for (const item of batchItems) {
       for (const [field, value] of Object.entries(sharedUpdates)) {
         const column = fieldToColumn[field];
         if (column && value !== undefined) {
           const range = `COMPRAS!${column}${item.rowIndex}`;
-          await updateSheetValue(range, [[String(value)]]);
+          updates.push({ range: range, values: [[String(value)]] });
         }
       }
 
-      // Atualizar timestamp de modificação (coluna T) em cada item
+      // 2. Acumular atualização de timestamp de modificação (coluna T)
       const timestampRange = `COMPRAS!T${item.rowIndex}`;
-      await updateSheetValue(timestampRange, [[`${timestamp}|${userEmail}`]]);
+      updates.push({ range: timestampRange, values: [[`${timestamp}|${userEmail}`]] });
     }
 
-    console.log(`✅ Dados compartilhados do lote ${reqMat} atualizados`);
+    // 3. Executar todas as atualizações em uma única chamada de API
+    await batchUpdateSheetValues(updates);
+
+    console.log(`✅ Dados compartilhados do lote ${reqMat} atualizados com sucesso (Batch).`);
   } catch (error) {
     console.error('Erro ao atualizar dados compartilhados do lote:', error);
     throw error;
@@ -665,11 +721,22 @@ export interface BatchProductUpdate {
 }
 
 /**
+ * Função auxiliar para acumular a atualização de soft delete (U e T)
+ */
+function accumulateSoftDeleteUpdate(updates: { range: string; values: string[][] }[], rowIndex: number, userEmail: string) {
+    const timestamp = new Date().toISOString();
+    updates.push({ range: `COMPRAS!U${rowIndex}`, values: [['REMOVIDO']] }); // Coluna U
+    updates.push({ range: `COMPRAS!T${rowIndex}`, values: [[`${timestamp}|${userEmail}`]] }); // Coluna T
+}
+
+
+/**
  * Atualiza um lote completo:
- * - Atualiza dados compartilhados
+ * - Atualiza dados compartilhados (usando o updateBatchSharedData refatorado)
  * - Atualiza produtos existentes
  * - Adiciona novos produtos
  * - Remove produtos marcados para exclusão
+ * REFATORADA: Usa Batch Update (batchUpdateSheetValues) para consolidar escritas.
  */
 export async function updateCompleteBatch(
   reqMat: string,
@@ -696,15 +763,19 @@ export async function updateCompleteBatch(
     const firstItem = currentBatchItems[0];
 
     // 1. Atualizar dados compartilhados em todos os itens existentes
+    //    NOTA: updateBatchSharedData JÁ ESTÁ refatorada para usar BATCH.
     await updateBatchSharedData(reqMat, sharedData, userEmail);
+
+    // Array para acumular todas as atualizações restantes (produtos existentes e remoções)
+    const productUpdates: { range: string; values: string[][] }[] = [];
 
     // 2. Processar produtos
     for (const product of products) {
       if (product.isDeleted && !product.isNew) {
-        // Remover produto existente (soft delete)
-        await markItemAsRemoved(product.rowIndex, userEmail);
+        // Acumular Soft Delete para produto existente (Colunas U e T)
+        accumulateSoftDeleteUpdate(productUpdates, product.rowIndex, userEmail);
       } else if (product.isNew && !product.isDeleted) {
-        // Adicionar novo produto ao lote
+        // Adicionar novo produto ao lote (APPEND - usa appendSheetRows, OK para inserção)
         const newRow = [
           '', // A: Data Compras
           '', // B: Status Compras
@@ -729,6 +800,7 @@ export async function updateCompleteBatch(
           'ATIVO' // U: Item Removido
         ];
 
+        // Append ainda é a maneira mais eficiente de ADICIONAR novas linhas.
         await appendSheetRows('COMPRAS!A3:U', [newRow]);
       } else if (!product.isNew && !product.isDeleted) {
         // Atualizar produto existente (campos individuais)
@@ -744,17 +816,21 @@ export async function updateCompleteBatch(
           const value = product[field as keyof BatchProductUpdate];
           if (value !== undefined) {
             const range = `COMPRAS!${column}${product.rowIndex}`;
-            await updateSheetValue(range, [[String(value)]]);
+            // Acumular atualização de campo
+            productUpdates.push({ range: range, values: [[String(value)]] });
           }
         }
 
-        // Atualizar timestamp
+        // Acumular atualização de timestamp (coluna T)
         const timestampRange = `COMPRAS!T${product.rowIndex}`;
-        await updateSheetValue(timestampRange, [[`${timestamp}|${userEmail}`]]);
+        productUpdates.push({ range: timestampRange, values: [[`${timestamp}|${userEmail}`]] });
       }
     }
 
-    console.log(`✅ Lote ${reqMat} atualizado completamente`);
+    // 3. Executar todas as atualizações de produtos existentes e remoções em um Batch
+    await batchUpdateSheetValues(productUpdates);
+    
+    console.log(`✅ Lote ${reqMat} atualizado completamente (Batch).`);
   } catch (error) {
     console.error('Erro ao atualizar lote completo:', error);
     throw error;
