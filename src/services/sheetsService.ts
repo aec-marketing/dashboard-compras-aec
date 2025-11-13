@@ -2,7 +2,7 @@
 const SHEET_ID = process.env.REACT_APP_SHEET_ID!;
 const API_KEY = process.env.REACT_APP_GOOGLE_API_KEY!;
 
-interface RequestRow {
+export interface RequestRow {
   rowIndex: number;
   dataCompras: string;
   statusCompras: string;
@@ -546,6 +546,217 @@ export async function addNewRequest(automacaoData: Partial<RequestRow>): Promise
     } as RequestRow;
   } catch (error) {
     console.error('Erro ao adicionar solicitação:', error);
+    throw error;
+  }
+}
+
+/**
+ * Atualiza múltiplos campos de uma solicitação (para edição completa)
+ * Usado pelo solicitante para editar sua própria solicitação
+ */
+export async function updateRequestFields(
+  rowIndex: number,
+  updates: Partial<RequestRow>,
+  userEmail: string
+): Promise<void> {
+  try {
+    const timestamp = new Date().toISOString();
+
+    // Mapeamento de campos para colunas
+    const fieldToColumn: Record<string, string> = {
+      statusAutomacao: 'E',
+      projeto: 'H',
+      codRef: 'J',
+      descricaoProduto: 'K',
+      materialMarca: 'L',
+      qtde: 'M',
+      dataNecessidade: 'N',
+      orcamentoLink: 'O',
+      observacao: 'Q'
+    };
+
+    // Atualizar cada campo individualmente
+    for (const [field, value] of Object.entries(updates)) {
+      const column = fieldToColumn[field];
+      if (column && value !== undefined) {
+        const range = `COMPRAS!${column}${rowIndex}`;
+        await updateSheetValue(range, [[String(value)]]);
+      }
+    }
+
+    // Atualizar timestamp de modificação (coluna T)
+    const timestampRange = `COMPRAS!T${rowIndex}`;
+    await updateSheetValue(timestampRange, [[`${timestamp}|${userEmail}`]]);
+
+    console.log(`✅ Solicitação atualizada: linha ${rowIndex}`);
+  } catch (error) {
+    console.error('Erro ao atualizar solicitação:', error);
+    throw error;
+  }
+}
+
+/**
+ * Verifica se um usuário é o solicitante de uma requisição
+ */
+export function isRequestOwner(request: RequestRow, userEmail: string): boolean {
+  return request.solicitante.toLowerCase() === userEmail.toLowerCase();
+}
+
+/**
+ * Atualiza dados compartilhados de um lote (afeta todos os itens)
+ */
+export async function updateBatchSharedData(
+  reqMat: string,
+  sharedUpdates: {
+    statusAutomacao?: string;
+    projeto?: string;
+    dataNecessidade?: string;
+    orcamentoLink?: string;
+  },
+  userEmail: string
+): Promise<void> {
+  try {
+    const timestamp = new Date().toISOString();
+    const allRequests = await fetchSolicitations();
+    const batchItems = allRequests.filter(req => req.reqMat === reqMat && req.itemRemovido !== 'REMOVIDO');
+
+    // Mapeamento de campos compartilhados para colunas
+    const fieldToColumn: Record<string, string> = {
+      statusAutomacao: 'E',
+      projeto: 'H',
+      dataNecessidade: 'N',
+      orcamentoLink: 'O'
+    };
+
+    // Atualizar cada campo em todos os itens do lote
+    for (const item of batchItems) {
+      for (const [field, value] of Object.entries(sharedUpdates)) {
+        const column = fieldToColumn[field];
+        if (column && value !== undefined) {
+          const range = `COMPRAS!${column}${item.rowIndex}`;
+          await updateSheetValue(range, [[String(value)]]);
+        }
+      }
+
+      // Atualizar timestamp de modificação (coluna T) em cada item
+      const timestampRange = `COMPRAS!T${item.rowIndex}`;
+      await updateSheetValue(timestampRange, [[`${timestamp}|${userEmail}`]]);
+    }
+
+    console.log(`✅ Dados compartilhados do lote ${reqMat} atualizados`);
+  } catch (error) {
+    console.error('Erro ao atualizar dados compartilhados do lote:', error);
+    throw error;
+  }
+}
+
+/**
+ * Interface para produto do lote (usado na edição)
+ */
+export interface BatchProductUpdate {
+  rowIndex: number;
+  codRef: string;
+  descricaoProduto: string;
+  materialMarca: string;
+  qtde: string;
+  observacao: string;
+  isNew?: boolean;
+  isDeleted?: boolean;
+}
+
+/**
+ * Atualiza um lote completo:
+ * - Atualiza dados compartilhados
+ * - Atualiza produtos existentes
+ * - Adiciona novos produtos
+ * - Remove produtos marcados para exclusão
+ */
+export async function updateCompleteBatch(
+  reqMat: string,
+  sharedData: {
+    statusAutomacao: string;
+    projeto: string;
+    dataNecessidade: string;
+    orcamentoLink?: string;
+  },
+  products: BatchProductUpdate[],
+  userEmail: string
+): Promise<void> {
+  try {
+    const timestamp = new Date().toISOString();
+    const allRequests = await fetchSolicitations();
+    const currentBatchItems = allRequests.filter(
+      req => req.reqMat === reqMat && req.itemRemovido !== 'REMOVIDO'
+    );
+
+    if (currentBatchItems.length === 0) {
+      throw new Error('Lote não encontrado');
+    }
+
+    const firstItem = currentBatchItems[0];
+
+    // 1. Atualizar dados compartilhados em todos os itens existentes
+    await updateBatchSharedData(reqMat, sharedData, userEmail);
+
+    // 2. Processar produtos
+    for (const product of products) {
+      if (product.isDeleted && !product.isNew) {
+        // Remover produto existente (soft delete)
+        await markItemAsRemoved(product.rowIndex, userEmail);
+      } else if (product.isNew && !product.isDeleted) {
+        // Adicionar novo produto ao lote
+        const newRow = [
+          '', // A: Data Compras
+          '', // B: Status Compras
+          '', // C: Ordem Compra
+          '', // D: Previsão Chegada
+          sharedData.statusAutomacao, // E: Status Automação (compartilhado)
+          reqMat, // F: REQ MAT (compartilhado - identifica o lote)
+          firstItem.dataAutomacao, // G: Data Automação (do lote original)
+          sharedData.projeto, // H: Projeto (compartilhado)
+          '', // I: Está Cadastrado
+          product.codRef, // J: Código/Ref (individual)
+          product.descricaoProduto, // K: Descrição (individual)
+          product.materialMarca, // L: Material/Marca (individual)
+          product.qtde, // M: Quantidade (individual)
+          sharedData.dataNecessidade, // N: Data Necessidade (compartilhado)
+          sharedData.orcamentoLink || '', // O: Orçamento Link (compartilhado)
+          firstItem.solicitante, // P: Solicitante (do lote original)
+          product.observacao || '', // Q: Observação (individual)
+          '', // R: Status Item Individual
+          '', // S: Visto Compras
+          `${timestamp}|${userEmail}`, // T: Última Modificação
+          'ATIVO' // U: Item Removido
+        ];
+
+        await appendSheetRows('COMPRAS!A3:U', [newRow]);
+      } else if (!product.isNew && !product.isDeleted) {
+        // Atualizar produto existente (campos individuais)
+        const fieldToColumn: Record<string, string> = {
+          codRef: 'J',
+          descricaoProduto: 'K',
+          materialMarca: 'L',
+          qtde: 'M',
+          observacao: 'Q'
+        };
+
+        for (const [field, column] of Object.entries(fieldToColumn)) {
+          const value = product[field as keyof BatchProductUpdate];
+          if (value !== undefined) {
+            const range = `COMPRAS!${column}${product.rowIndex}`;
+            await updateSheetValue(range, [[String(value)]]);
+          }
+        }
+
+        // Atualizar timestamp
+        const timestampRange = `COMPRAS!T${product.rowIndex}`;
+        await updateSheetValue(timestampRange, [[`${timestamp}|${userEmail}`]]);
+      }
+    }
+
+    console.log(`✅ Lote ${reqMat} atualizado completamente`);
+  } catch (error) {
+    console.error('Erro ao atualizar lote completo:', error);
     throw error;
   }
 }

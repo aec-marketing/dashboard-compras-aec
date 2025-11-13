@@ -1,14 +1,20 @@
 // src/components/Dashboard/DashboardEngenharia.tsx - ATUALIZADO
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../hooks/useAuth';
-import { 
-  fetchSolicitations, 
-  updateAutomacaoField, 
+import {
+  fetchSolicitations,
+  updateAutomacaoField,
   addNewRequest,
   addBatchRequest,
-  isBatch 
+  isBatch,
+  updateRequestFields,
+  isRequestOwner,
+  updateCompleteBatch,
+  BatchProductUpdate
 } from '../../services/sheetsService';
 import { FormularioLote } from './FormularioLote';
+import EditRequestModal from '../Shared/EditRequestModal';
+import EditBatchModal from '../Shared/EditBatchModal';
 
 interface RequestRow {
   rowIndex: number;
@@ -99,6 +105,14 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
   const [searchText, setSearchText] = useState('');
   const [expandedBatches, setExpandedBatches] = useState<Set<string>>(new Set());
 
+  // Estados para modal de edição (itens individuais)
+  const [editingRequest, setEditingRequest] = useState<RequestRow | null>(null);
+  const [showEditModal, setShowEditModal] = useState(false);
+
+  // Estados para modal de edição de lotes
+  const [editingBatch, setEditingBatch] = useState<RequestRow[] | null>(null);
+  const [showEditBatchModal, setShowEditBatchModal] = useState(false);
+
   const loadData = async () => {
     try {
       setLoading(true);
@@ -153,6 +167,91 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
     } catch (err) {
       setError('Erro ao atualizar status.');
       console.error(err);
+    }
+  };
+
+  // Função para abrir modal de edição
+  const handleOpenEditModal = (request: RequestRow) => {
+    setEditingRequest(request);
+    setShowEditModal(true);
+  };
+
+  // Função para fechar modal de edição
+  const handleCloseEditModal = () => {
+    setEditingRequest(null);
+    setShowEditModal(false);
+  };
+
+  // Função para salvar edições
+  const handleSaveEdit = async (updatedData: Partial<RequestRow>) => {
+    if (!editingRequest || !user?.email) return;
+
+    try {
+      setLoading(true);
+      await updateRequestFields(editingRequest.rowIndex, updatedData, user.email);
+
+      // Atualizar estado local
+      setRequests(prev =>
+        prev.map(req =>
+          req.rowIndex === editingRequest.rowIndex
+            ? { ...req, ...updatedData }
+            : req
+        )
+      );
+
+      handleCloseEditModal();
+      await loadData(); // Recarregar dados para garantir sincronização
+    } catch (err) {
+      console.error('Erro ao salvar edição:', err);
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Função para abrir modal de edição de lote
+  const handleOpenEditBatchModal = (reqMat: string) => {
+    const batchItems = requests.filter(req => req.reqMat === reqMat && req.itemRemovido !== 'REMOVIDO');
+    setEditingBatch(batchItems);
+    setShowEditBatchModal(true);
+  };
+
+  // Função para fechar modal de edição de lote
+  const handleCloseEditBatchModal = () => {
+    setEditingBatch(null);
+    setShowEditBatchModal(false);
+  };
+
+  // Função para salvar edições do lote
+  const handleSaveBatchEdit = async (
+    sharedData: Partial<RequestRow>,
+    products: BatchProductUpdate[]
+  ) => {
+    if (!editingBatch || !user?.email) return;
+
+    const reqMat = editingBatch[0].reqMat;
+
+    try {
+      setLoading(true);
+      await updateCompleteBatch(
+        reqMat,
+        {
+          statusAutomacao: sharedData.statusAutomacao || '',
+          projeto: sharedData.projeto || '',
+          dataNecessidade: sharedData.dataNecessidade || '',
+          orcamentoLink: sharedData.orcamentoLink
+        },
+        products,
+        user.email
+      );
+
+      handleCloseEditBatchModal();
+      await loadData(); // Recarregar dados para garantir sincronização
+    } catch (err) {
+      console.error('Erro ao salvar edição do lote:', err);
+      throw err;
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -628,7 +727,7 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
                             </span>
                           )}
                         </div>
-                        
+
                         {isLoteGroup ? (
                           <div>
                             <h3 className="text-lg font-bold text-gray-800">
@@ -648,6 +747,31 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
                           </h3>
                         )}
                       </div>
+
+                      {/* Botões de Edição - só aparecem se o usuário é o solicitante */}
+                      {user?.email && isRequestOwner(firstItem, user.email) && (
+                        <div className="ml-2">
+                          {isLoteGroup ? (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditBatchModal(firstItem.reqMat)}
+                              className="px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-md text-xs font-medium transition-colors flex items-center gap-1"
+                              title="Editar lote completo"
+                            >
+                              ✏️ Editar Lote
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditModal(firstItem)}
+                              className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-xs font-medium transition-colors flex items-center gap-1"
+                              title="Editar sua solicitação"
+                            >
+                              ✏️ Editar
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </div>
 
                     {/* Informações Principais do Lote ou Item */}
@@ -838,6 +962,28 @@ export const DashboardEngenharia: React.FC<DashboardEngenhariaProps> = ({ depart
           </div>
         )}
       </main>
+
+      {/* Modal de Edição (Item Individual) */}
+      {showEditModal && editingRequest && user?.email && (
+        <EditRequestModal
+          request={editingRequest}
+          userEmail={user.email}
+          onClose={handleCloseEditModal}
+          onSave={handleSaveEdit}
+          isOwner={isRequestOwner(editingRequest, user.email)}
+        />
+      )}
+
+      {/* Modal de Edição de Lote */}
+      {showEditBatchModal && editingBatch && editingBatch.length > 0 && user?.email && (
+        <EditBatchModal
+          batchItems={editingBatch}
+          userEmail={user.email}
+          onClose={handleCloseEditBatchModal}
+          onSave={handleSaveBatchEdit}
+          isOwner={isRequestOwner(editingBatch[0], user.email)}
+        />
+      )}
     </div>
   );
 };
